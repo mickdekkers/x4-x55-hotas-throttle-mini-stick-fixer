@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Windows.Gaming.Input;
+using WindowsInput;
 
 namespace Application
 {
@@ -45,6 +46,7 @@ namespace Application
                     cts.Cancel();
                     cts.Dispose();
                     cts = new CancellationTokenSource();
+                    monitor?.ReleaseAllKeys();
                     monitor = null;
                 }
             };
@@ -66,6 +68,7 @@ namespace Application
                 await monitorTask;
             }
 
+            monitor?.ReleaseAllKeys();
             Console.WriteLine("Done");
         }
     }
@@ -148,16 +151,19 @@ class Throttle
     }
 }
 
-class MiniStickMonitor
+class MiniStickMonitor : IDisposable
 {
     private readonly Throttle throttle;
     private readonly CancellationToken token;
+    private readonly InputSimulator inputSimulator;
     private readonly int warmupPeriod = 3000; // Warm-up period in milliseconds
+    private Throttle.MiniStickDirection lastDirection = Throttle.MiniStickDirection.Neutral;
 
     public MiniStickMonitor(Throttle throttle, CancellationToken token)
     {
         this.throttle = throttle;
         this.token = token;
+        this.inputSimulator = new InputSimulator();
     }
 
     public void Monitor()
@@ -172,14 +178,21 @@ class MiniStickMonitor
             if (DateTime.Now >= warmupEndTime)
             {
                 LogDirection(axis0, axis1, direction);
+                if (direction != lastDirection)
+                {
+                    UpdateKeys(lastDirection, direction);
+                    lastDirection = direction;
+                }
             }
             else
             {
                 Console.WriteLine("Warm-up period: ignoring initial readings.");
             }
 
-            Thread.Sleep(500); // Wait for 500 ms
+            Thread.Sleep(1000 / 60); // Poll input at 60 Hz
         }
+
+        ReleaseAllKeys();
     }
 
     private void LogDirection(double axis0, double axis1, Throttle.MiniStickDirection direction)
@@ -188,6 +201,72 @@ class MiniStickMonitor
         Console.WriteLine($"Mini stick axis 0: {axis0}");
         Console.WriteLine($"Mini stick axis 1: {axis1}");
         Console.WriteLine($"Mini stick direction: {direction}");
+    }
+
+    private void UpdateKeys(Throttle.MiniStickDirection lastDirection, Throttle.MiniStickDirection newDirection)
+    {
+        var lastKeys = GetKeysForDirection(lastDirection);
+        var newKeys = GetKeysForDirection(newDirection);
+
+        // Release keys that are no longer needed
+        foreach (var key in lastKeys.Except(newKeys))
+        {
+            inputSimulator.Keyboard.KeyUp(key);
+        }
+
+        // Press keys that are newly needed
+        foreach (var key in newKeys.Except(lastKeys))
+        {
+            inputSimulator.Keyboard.KeyDown(key);
+        }
+    }
+
+    private IEnumerable<VirtualKeyCode> GetKeysForDirection(Throttle.MiniStickDirection direction)
+    {
+        switch (direction)
+        {
+            case Throttle.MiniStickDirection.Up:
+                return new[] { VirtualKeyCode.VK_W };
+            case Throttle.MiniStickDirection.Down:
+                return new[] { VirtualKeyCode.VK_S };
+            case Throttle.MiniStickDirection.Left:
+                return new[] { VirtualKeyCode.VK_A };
+            case Throttle.MiniStickDirection.Right:
+                return new[] { VirtualKeyCode.VK_D };
+            case Throttle.MiniStickDirection.TopRight:
+                return new[] { VirtualKeyCode.VK_W, VirtualKeyCode.VK_D };
+            case Throttle.MiniStickDirection.TopLeft:
+                return new[] { VirtualKeyCode.VK_W, VirtualKeyCode.VK_A };
+            case Throttle.MiniStickDirection.BottomRight:
+                return new[] { VirtualKeyCode.VK_S, VirtualKeyCode.VK_D };
+            case Throttle.MiniStickDirection.BottomLeft:
+                return new[] { VirtualKeyCode.VK_S, VirtualKeyCode.VK_A };
+            case Throttle.MiniStickDirection.Neutral:
+                return Enumerable.Empty<VirtualKeyCode>();
+            default:
+                return Enumerable.Empty<VirtualKeyCode>();
+        }
+    }
+
+    public void ReleaseAllKeys()
+    {
+        var allKeys = new[]
+        {
+            VirtualKeyCode.VK_W,
+            VirtualKeyCode.VK_A,
+            VirtualKeyCode.VK_S,
+            VirtualKeyCode.VK_D
+        };
+
+        foreach (var key in allKeys)
+        {
+            inputSimulator.Keyboard.KeyUp(key);
+        }
+    }
+
+    public void Dispose()
+    {
+        ReleaseAllKeys();
     }
 }
 
