@@ -1,57 +1,72 @@
-﻿using Windows.Gaming.Input;
-using System;
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Windows.Gaming.Input;
 
 namespace Application
 {
     class Program
     {
-        static void Main(string[] args)
+        static async Task Main(string[] args)
         {
-
-            // See https://aka.ms/new-console-template for more information
             Console.WriteLine("The current time is " + DateTime.Now);
 
-            MyClass myClass = new MyClass();
+            using GameControllerManager manager = new GameControllerManager();
+            CancellationTokenSource cts = new CancellationTokenSource();
+            MiniStickMonitor? monitor = null;
+            Task? monitorTask = null;
 
-            System.Threading.Thread.Sleep(1000);
-
-            lock (myClass.myLock)
+            void StartMonitor(RawGameController controller)
             {
-                foreach (var rawGameController in myClass.myRawGameControllers)
+                if (monitor == null)
                 {
-                    Console.WriteLine(rawGameController.DisplayName);
+                    var throttle = new Throttle(controller);
+                    monitor = new MiniStickMonitor(throttle, cts.Token);
+                    monitorTask = Task.Run(() => monitor.Monitor());
                 }
+            }
 
-                var throttleCandidate = myClass.myRawGameControllers.Where(x => x.DisplayName.Contains("X-55 Rhino Throttle")).First();
-
-                Console.WriteLine("Throttle: " + throttleCandidate.DisplayName);
-                Console.WriteLine("Throttle vendor: " + throttleCandidate.HardwareVendorId);
-                Console.WriteLine("Throttle product: " + throttleCandidate.HardwareProductId);
-                Console.WriteLine("Throttle axis count: " + throttleCandidate.AxisCount);
-
-                var throttle = new Throttle(throttleCandidate);
-
-                while (true)
+            manager.ControllerAdded += (sender, e) =>
+            {
+                if (e.HardwareVendorId == 1848 && e.HardwareProductId == 41493)
                 {
-
-                    Console.Clear();
-
-                    var dir = throttle.GetCurrentMiniStickDirection();
-
-
-                    // Now wait 500 ms
-
-                    System.Threading.Thread.Sleep(500);
+                    Console.WriteLine("Throttle connected: " + e.DisplayName);
+                    StartMonitor(e);
                 }
+            };
 
+            manager.ControllerRemoved += (sender, e) =>
+            {
+                if (e.HardwareVendorId == 1848 && e.HardwareProductId == 41493)
+                {
+                    Console.WriteLine("Throttle disconnected: " + e.DisplayName);
+                    cts.Cancel();
+                    cts.Dispose();
+                    cts = new CancellationTokenSource();
+                    monitor = null;
+                }
+            };
+
+            Console.WriteLine("Waiting for throttle device to connect...");
+            var throttleDevice = await manager.WaitForThrottleDeviceAsync(1848, 41493);
+
+            if (throttleDevice != null)
+            {
+                StartMonitor(throttleDevice);
             }
 
             Console.WriteLine("Press any key to exit");
-
             Console.ReadKey();
+            cts.Cancel();
+
+            if (monitorTask != null)
+            {
+                await monitorTask;
+            }
 
             Console.WriteLine("Done");
-
         }
     }
 }
@@ -62,6 +77,7 @@ class Throttle
     private readonly bool[] buttons;
     private readonly GameControllerSwitchPosition[] switches;
     private readonly double[] axes;
+    private const double Tolerance = 0.25; // Adjust this value as needed
 
     public Throttle(RawGameController throttle)
     {
@@ -69,6 +85,16 @@ class Throttle
         this.buttons = new bool[throttle.ButtonCount];
         this.switches = new GameControllerSwitchPosition[throttle.SwitchCount];
         this.axes = new double[throttle.AxisCount];
+    }
+
+    public MiniStickDirection GetCurrentMiniStickDirection(out double axis0, out double axis1)
+    {
+        throttle.GetCurrentReading(buttons, switches, axes);
+
+        axis0 = axes[6];
+        axis1 = axes[7];
+
+        return GetMiniStickDirection(axis0, axis1);
     }
 
     public enum MiniStickDirection
@@ -83,25 +109,6 @@ class Throttle
         BottomRight,
         BottomLeft
     }
-
-    public MiniStickDirection GetCurrentMiniStickDirection()
-    {
-        throttle.GetCurrentReading(buttons, switches, axes);
-
-        var miniStickAxis0 = axes[6];
-        var miniStickAxis1 = axes[7];
-
-        Console.WriteLine("Mini stick axis 0: " + miniStickAxis0);
-        Console.WriteLine("Mini stick axis 1: " + miniStickAxis1);
-
-        var dir = GetMiniStickDirection(miniStickAxis0, miniStickAxis1);
-
-        Console.WriteLine("Mini stick direction: " + dir);
-
-        return dir;
-    }
-
-    private const double Tolerance = 0.25; // Adjust this value as needed
 
     private static MiniStickDirection GetMiniStickDirection(double axis0, double axis1)
     {
@@ -135,47 +142,136 @@ class Throttle
         return MiniStickDirection.Neutral; // Default to Neutral if no direction is determined
     }
 
-
-
     private static bool IsWithinTolerance(double value, double target)
     {
         return Math.Abs(value - target) <= Tolerance;
     }
 }
 
-class MyClass
+class MiniStickMonitor
 {
-    public readonly object myLock = new object();
-    public HashSet<RawGameController> myRawGameControllers = new HashSet<RawGameController>();
+    private readonly Throttle throttle;
+    private readonly CancellationToken token;
+    private readonly int warmupPeriod = 3000; // Warm-up period in milliseconds
 
-
-    public MyClass()
+    public MiniStickMonitor(Throttle throttle, CancellationToken token)
     {
-        RawGameController.RawGameControllerAdded += (object sender, RawGameController e) =>
-        {
-            lock (myLock)
-            {
-                myRawGameControllers.Add(e);
-            }
-        };
+        this.throttle = throttle;
+        this.token = token;
+    }
 
+    public void Monitor()
+    {
+        var warmupEndTime = DateTime.Now.AddMilliseconds(warmupPeriod);
 
-        RawGameController.RawGameControllerRemoved += (object sender, RawGameController e) =>
+        while (!token.IsCancellationRequested)
         {
-            lock (myLock)
-            {
-                myRawGameControllers.Remove(e);
-            }
-        };
+            double axis0, axis1;
+            var direction = throttle.GetCurrentMiniStickDirection(out axis0, out axis1);
 
-        lock (myLock)
-        {
-            foreach (var rawGameController in RawGameController.RawGameControllers)
+            if (DateTime.Now >= warmupEndTime)
             {
-                myRawGameControllers.Add(rawGameController);
+                LogDirection(axis0, axis1, direction);
             }
+            else
+            {
+                Console.WriteLine("Warm-up period: ignoring initial readings.");
+            }
+
+            Thread.Sleep(500); // Wait for 500 ms
         }
+    }
+
+    private void LogDirection(double axis0, double axis1, Throttle.MiniStickDirection direction)
+    {
+        // Replace with a more sophisticated logging mechanism if needed
+        Console.WriteLine($"Mini stick axis 0: {axis0}");
+        Console.WriteLine($"Mini stick axis 1: {axis1}");
+        Console.WriteLine($"Mini stick direction: {direction}");
     }
 }
 
+class GameControllerManager : IDisposable
+{
+    private readonly object controllerLock = new object();
+    private readonly HashSet<RawGameController> controllers = new HashSet<RawGameController>();
 
+    public event EventHandler<RawGameController>? ControllerAdded;
+    public event EventHandler<RawGameController>? ControllerRemoved;
+
+    public GameControllerManager()
+    {
+        RawGameController.RawGameControllerAdded += OnRawGameControllerAdded;
+        RawGameController.RawGameControllerRemoved += OnRawGameControllerRemoved;
+
+        lock (controllerLock)
+        {
+            foreach (var rawGameController in RawGameController.RawGameControllers)
+            {
+                controllers.Add(rawGameController);
+            }
+        }
+    }
+
+    private void OnRawGameControllerAdded(object? sender, RawGameController e)
+    {
+        lock (controllerLock)
+        {
+            controllers.Add(e);
+        }
+        ControllerAdded?.Invoke(this, e);
+    }
+
+    private void OnRawGameControllerRemoved(object? sender, RawGameController e)
+    {
+        lock (controllerLock)
+        {
+            controllers.Remove(e);
+        }
+        ControllerRemoved?.Invoke(this, e);
+    }
+
+    public bool IsControllerConnected(uint vendorId, uint productId)
+    {
+        lock (controllerLock)
+        {
+            return controllers.Any(c => c.HardwareVendorId == vendorId && c.HardwareProductId == productId);
+        }
+    }
+
+    public async Task<RawGameController?> WaitForThrottleDeviceAsync(uint vendorId, uint productId)
+    {
+        var tcs = new TaskCompletionSource<RawGameController?>();
+
+        EventHandler<RawGameController>? addedHandler = null;
+        addedHandler = (sender, e) =>
+        {
+            if (e.HardwareVendorId == vendorId && e.HardwareProductId == productId)
+            {
+                tcs.TrySetResult(e);
+                ControllerAdded -= addedHandler;
+            }
+        };
+
+        ControllerAdded += addedHandler;
+
+        // Check again to avoid race conditions
+        lock (controllerLock)
+        {
+            var existingController = controllers.FirstOrDefault(c => c.HardwareVendorId == vendorId && c.HardwareProductId == productId);
+            if (existingController != null)
+            {
+                tcs.TrySetResult(existingController);
+                ControllerAdded -= addedHandler;
+            }
+        }
+
+        return await tcs.Task.ConfigureAwait(false);
+    }
+
+    public void Dispose()
+    {
+        RawGameController.RawGameControllerAdded -= OnRawGameControllerAdded;
+        RawGameController.RawGameControllerRemoved -= OnRawGameControllerRemoved;
+    }
+}
