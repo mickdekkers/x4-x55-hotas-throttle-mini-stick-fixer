@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -10,6 +11,9 @@ namespace Application
 {
     class Program
     {
+        private const uint VendorId = 1848;
+        private const uint ProductId = 41493;
+
         static async Task Main(string[] args)
         {
             Console.WriteLine("The current time is " + DateTime.Now);
@@ -18,20 +22,22 @@ namespace Application
             CancellationTokenSource cts = new CancellationTokenSource();
             MiniStickMonitor? monitor = null;
             Task? monitorTask = null;
+            BlockingCollection<(double axis0, double axis1, Throttle.MiniStickDirection direction, bool warmup)> directionQueue = new BlockingCollection<(double, double, Throttle.MiniStickDirection, bool)>();
 
             void StartMonitor(RawGameController controller)
             {
                 if (monitor == null)
                 {
                     var throttle = new Throttle(controller);
-                    monitor = new MiniStickMonitor(throttle, cts.Token);
+                    monitor = new MiniStickMonitor(throttle, cts.Token, directionQueue);
                     monitorTask = Task.Run(() => monitor.Monitor());
+                    Task.Run(() => LogDirections(directionQueue, cts.Token));
                 }
             }
 
             manager.ControllerAdded += (sender, e) =>
             {
-                if (e.HardwareVendorId == 1848 && e.HardwareProductId == 41493)
+                if (e.HardwareVendorId == VendorId && e.HardwareProductId == ProductId)
                 {
                     Console.WriteLine("Throttle connected: " + e.DisplayName);
                     StartMonitor(e);
@@ -40,7 +46,7 @@ namespace Application
 
             manager.ControllerRemoved += (sender, e) =>
             {
-                if (e.HardwareVendorId == 1848 && e.HardwareProductId == 41493)
+                if (e.HardwareVendorId == VendorId && e.HardwareProductId == ProductId)
                 {
                     Console.WriteLine("Throttle disconnected: " + e.DisplayName);
                     cts.Cancel();
@@ -52,7 +58,7 @@ namespace Application
             };
 
             Console.WriteLine("Waiting for throttle device to connect...");
-            var throttleDevice = await manager.WaitForThrottleDeviceAsync(1848, 41493);
+            var throttleDevice = await manager.WaitForThrottleDeviceAsync(VendorId, ProductId);
 
             if (throttleDevice != null)
             {
@@ -70,6 +76,39 @@ namespace Application
 
             monitor?.ReleaseAllKeys();
             Console.WriteLine("Done");
+        }
+
+        static void LogDirections(BlockingCollection<(double axis0, double axis1, Throttle.MiniStickDirection direction, bool warmup)> directionQueue, CancellationToken token)
+        {
+            double lastAxis0 = 0, lastAxis1 = 0;
+            Throttle.MiniStickDirection lastDirection = Throttle.MiniStickDirection.Neutral;
+            bool lastWarmup = false;
+
+            while (!token.IsCancellationRequested)
+            {
+                if (directionQueue.TryTake(out var item, 1000 / 10)) // Log at 10 Hz
+                {
+                    if (item.warmup != lastWarmup || item.axis0 != lastAxis0 || item.axis1 != lastAxis1 || item.direction != lastDirection)
+                    {
+                        Console.Clear();
+                        if (item.warmup)
+                        {
+                            Console.WriteLine("Warm-up period: ignoring initial readings.");
+                        }
+                        else
+                        {
+                            Console.WriteLine($"Mini stick axis 0: {item.axis0}");
+                            Console.WriteLine($"Mini stick axis 1: {item.axis1}");
+                            Console.WriteLine($"Mini stick direction: {item.direction}");
+                        }
+
+                        lastAxis0 = item.axis0;
+                        lastAxis1 = item.axis1;
+                        lastDirection = item.direction;
+                        lastWarmup = item.warmup;
+                    }
+                }
+            }
         }
     }
 }
@@ -156,14 +195,16 @@ class MiniStickMonitor : IDisposable
     private readonly Throttle throttle;
     private readonly CancellationToken token;
     private readonly InputSimulator inputSimulator;
-    private readonly int warmupPeriod = 3000; // Warm-up period in milliseconds
+    private readonly BlockingCollection<(double axis0, double axis1, Throttle.MiniStickDirection direction, bool warmup)> directionQueue;
+    private readonly int warmupPeriod = 5000; // Warm-up period in milliseconds
     private Throttle.MiniStickDirection lastDirection = Throttle.MiniStickDirection.Neutral;
 
-    public MiniStickMonitor(Throttle throttle, CancellationToken token)
+    public MiniStickMonitor(Throttle throttle, CancellationToken token, BlockingCollection<(double axis0, double axis1, Throttle.MiniStickDirection direction, bool warmup)> directionQueue)
     {
         this.throttle = throttle;
         this.token = token;
         this.inputSimulator = new InputSimulator();
+        this.directionQueue = directionQueue;
     }
 
     public void Monitor()
@@ -174,33 +215,20 @@ class MiniStickMonitor : IDisposable
         {
             double axis0, axis1;
             var direction = throttle.GetCurrentMiniStickDirection(out axis0, out axis1);
+            bool warmup = DateTime.Now < warmupEndTime;
 
-            if (DateTime.Now >= warmupEndTime)
+            directionQueue.Add((axis0, axis1, direction, warmup));
+
+            if (!warmup && direction != lastDirection)
             {
-                LogDirection(axis0, axis1, direction);
-                if (direction != lastDirection)
-                {
-                    UpdateKeys(lastDirection, direction);
-                    lastDirection = direction;
-                }
-            }
-            else
-            {
-                Console.WriteLine("Warm-up period: ignoring initial readings.");
+                UpdateKeys(lastDirection, direction);
+                lastDirection = direction;
             }
 
             Thread.Sleep(1000 / 60); // Poll input at 60 Hz
         }
 
         ReleaseAllKeys();
-    }
-
-    private void LogDirection(double axis0, double axis1, Throttle.MiniStickDirection direction)
-    {
-        // Replace with a more sophisticated logging mechanism if needed
-        Console.WriteLine($"Mini stick axis 0: {axis0}");
-        Console.WriteLine($"Mini stick axis 1: {axis1}");
-        Console.WriteLine($"Mini stick direction: {direction}");
     }
 
     private void UpdateKeys(Throttle.MiniStickDirection lastDirection, Throttle.MiniStickDirection newDirection)
