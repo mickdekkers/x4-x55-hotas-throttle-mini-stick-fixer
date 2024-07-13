@@ -6,6 +6,8 @@ Hey there! I created this small program to solve a very specific problem with my
 
 ## Background
 
+![x55-hotas-throttle-mini-stick](https://github.com/user-attachments/assets/966e3109-88cb-4699-907a-4f564ecee20c)
+
 I recently started playing [X4: Foundations](https://store.steampowered.com/app/392160/X4_Foundations/) and decided to try setting up my HOTAS with it today. While I was mapping the controls (following [this video](https://www.youtube.com/watch?v=Mog0rcd5aH4), super helpful), everything seemed to work great until I got to the mini joystick on the throttle. Strangely, the game didn't respond to it at all. I knew it wasn't a hardware issue because https://hardwaretester.com/gamepad detected it just fine.
 
 As a workaround, I wanted to remap the mini joystick to the WASD keys on my keyboard. However, the software that came with my HOTAS, which has a remapping/macro feature, is quite old and didn't seem to work for this.
